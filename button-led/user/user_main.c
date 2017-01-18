@@ -39,7 +39,7 @@
  */
 
 /*****************************************************************************************
- * Welcome to the HomeACcessoryKid hkc demo
+ * Welcome to the HomeACcessoryKid hkc button led
  * With a few lines of code we demonstrate the easy setup of your ESP8266 as an accessory.
  * Start defining your accessory in hkc_user_init and execute other pending init tasks.
  * For each Service characteristic a callback function is defined.
@@ -65,39 +65,50 @@ xQueueHandle identifyQueue;
 struct  gpio {
     int aid;
     int iid;
+  cJSON *value;
 } gpio2;
 
-void    led_task(void *arg) //make transfer of gpio via arg, starting as a static variable in led routine
-{
-    int     i,original;
-    cJSON   *value;
 
-    os_printf("led_task started\n");
-    value=cJSON_CreateBool(0); //value doesn't matter
-    while(1) {
-        vTaskDelay(1500); //15 sec
-        original=GPIO_INPUT_GET(GPIO_ID_PIN(2)); //get original state
-//      os_printf("original:%d\n",original);
-        value->type=original^1;
-        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),original^1); // and toggle
-        change_value(    gpio2.aid,gpio2.iid,value);
+void    led_intr()
+{
+    int             new;
+    static uint32   oldtime;
+
+    if ( (oldtime+200)<(oldtime=(system_get_time()/1000) ) ) {  //200ms debounce guard
+        new=GPIO_INPUT(GPIO_Pin_2)^1; //get new state
+        GPIO_OUTPUT(GPIO_Pin_2,new);       //toggle
+        gpio2.value->type=new;
+        change_value(    gpio2.aid,gpio2.iid,gpio2.value);
         send_events(NULL,gpio2.aid,gpio2.iid);
     }
 }
 
 void led(int aid, int iid, cJSON *value, int mode)
 {
+    GPIO_ConfigTypeDef gpio0_in_cfg;
+    GPIO_ConfigTypeDef gpio2_in_cfg;
+
     switch (mode) {
         case 1: { //changed by gui
             char *out; out=cJSON_Print(value);  os_printf("led %s\n",out);  free(out);  // Print to text, print it, release the string.
-            if (value) GPIO_OUTPUT_SET(GPIO_ID_PIN(2), value->type);
+            if (value) GPIO_OUTPUT(GPIO_Pin_2, value->type);
         }break;
         case 0: { //init
-            PIN_FUNC_SELECT(GPIO_PIN_REG_2,FUNC_GPIO2);
-            PIN_PULLUP_EN(GPIO_PIN_REG_2);
+            gpio0_in_cfg.GPIO_IntrType = GPIO_PIN_INTR_NEGEDGE;         //Falling edge trigger
+            gpio0_in_cfg.GPIO_Mode     = GPIO_Mode_Input;               //Input mode
+            gpio0_in_cfg.GPIO_Pin      = GPIO_Pin_0;                    //Enable GPIO
+            gpio_config(&gpio0_in_cfg);                                 //Initialization function
+            gpio_intr_callbacks[0]=led_intr;                           //define the Pin0 callback
+            
+            gpio2_in_cfg.GPIO_IntrType = GPIO_PIN_INTR_DISABLE;         //no interrupt
+            gpio2_in_cfg.GPIO_Mode     = GPIO_Mode_Output;              //Output mode
+            gpio2_in_cfg.GPIO_Pullup   = GPIO_PullUp_EN;                //improves transitions
+            gpio2_in_cfg.GPIO_Pin      = GPIO_Pin_2;                    //Enable GPIO
+            gpio_config(&gpio2_in_cfg);                                 //Initialization function
+            
             led(aid,iid,value,1);
             gpio2.aid=aid; gpio2.iid=iid;
-            xTaskCreate(led_task,"led",512,NULL,2,NULL);
+            gpio2.value=cJSON_CreateBool(0); //value doesn't matter
         }break;
         case 2: { //update
             //do nothing
@@ -115,11 +126,11 @@ void identify_task(void *arg)
     os_printf("identify_task started\n");
     while(1) {
         while(!xQueueReceive(identifyQueue,NULL,10));//wait for a queue item
-        original=GPIO_INPUT_GET(GPIO_ID_PIN(2)); //get original state
+        original=GPIO_INPUT(GPIO_Pin_2); //get original state
         for (i=0;i<2;i++) {
-            GPIO_OUTPUT_SET(GPIO_ID_PIN(2),original^1); // and toggle
+            GPIO_OUTPUT(GPIO_Pin_2,original^1); // and toggle
             vTaskDelay(30); //0.3 sec
-            GPIO_OUTPUT_SET(GPIO_ID_PIN(2),original^0);
+            GPIO_OUTPUT(GPIO_Pin_2,original^0);
             vTaskDelay(30); //0.3 sec
         }
     }
@@ -133,8 +144,6 @@ void identify(int aid, int iid, cJSON *value, int mode)
         }break;
         case 0: { //init
         identifyQueue = xQueueCreate( 1, 0 );
-        PIN_FUNC_SELECT(GPIO_PIN_REG_2,FUNC_GPIO2);
-        PIN_PULLUP_EN(GPIO_PIN_REG_2);
         xTaskCreate(identify_task,"identify",256,NULL,2,NULL);
         }break;
         case 2: { //update
@@ -168,11 +177,6 @@ void    hkc_user_init(char *accname)
     chas=addService(      sers,++iid,APPLE,SWITCH_S);
     addCharacteristic(chas,aid,++iid,APPLE,NAME_C,"led",NULL);
     addCharacteristic(chas,aid,++iid,APPLE,POWER_STATE_C,"1",led);
-    //service 2
-    chas=addService(      sers,++iid,APPLE,LIGHTBULB_S);
-    addCharacteristic(chas,aid,++iid,APPLE,NAME_C,"light",NULL);
-    addCharacteristic(chas,aid,++iid,APPLE,POWER_STATE_C,"0",NULL);
-    addCharacteristic(chas,aid,++iid,APPLE, BRIGHTNESS_C,"0",NULL);
 
     char *out;
     out=cJSON_Print(root);  os_printf("%s\n",out);  free(out);  // Print to text, print it, release the string.
@@ -181,6 +185,9 @@ void    hkc_user_init(char *accname)
 //      out=cJSON_Print(acc_items[iid].json);
 //      os_printf("1.%d=%s\n",iid,out); free(out);
 //  }
+
+    gpio_intr_handler_register(gpio_intr_handler,NULL);         //Register the interrupt function
+    GPIO_INTERRUPT_ENABLE;
 }
 
 /******************************************************************************
@@ -204,7 +211,7 @@ void user_init(void)
     
     //try to only do the bare minimum here and do the rest in hkc_user_init
     // if not you could easily run out of stack space during pairing-setup
-    hkc_init("HomeACcessory");
+    hkc_init("button-led");
     
     os_printf("end of user_init @ %d\n",system_get_time()/1000);
 }
